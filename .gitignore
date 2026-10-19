@@ -1,0 +1,23 @@
+node_modules/
+**/node_modules/
+dist/
+build/
+coverage/
+.vite/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+!**/.env.example
+uploads/
+*.log
+.DS_Store
+Thumbs.db
+
+# Local notes and Office temporary files
+InsightFlow_Codex_Complete_Command_Book.docx
+~$*

@@ -1,0 +1,41 @@
+﻿services:
+  - type: web
+    name: insightflow-app
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm --workspace backend run start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FRONTEND_ORIGIN
+        value: https://insightflow-app.onrender.com
+      - key: MONGODB_URI
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.8-flash
+      - key: ANALYSIS_SERVICE_URL
+        value: https://insightflow-analysis.onrender.com
+      - fromGroup: insightflow-internal
+
+  - type: web
+    name: insightflow-analysis
+    runtime: python
+    rootDir: analysis-service
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - fromGroup: insightflow-internal
+
+envVarGroups:
+  - name: insightflow-internal
+    envVars:
+      - key: ANALYSIS_SERVICE_TOKEN
+        generateValue: true
