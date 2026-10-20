@@ -14,7 +14,7 @@ export interface StoredDataset {
   workingStorageName?: string;
   cleaningHistory: { action: string; timestamp: Date; affectedRows: number; affectedColumns: number; column?: string; versionStorageName: string; previousStorageName?: string }[];
   savedAnalyses: { id: string; name: string; configuration: Record<string, unknown>; createdAt: Date }[];
-  questionHistory: { id: string; question: string; planSummary: string; createdAt: Date }[];
+  questionHistory: { id: string; question: string; planSummary: string; answer?: string; supported?: boolean; createdAt: Date }[];
   originalRowCount?: number;
   originalColumnCount?: number;
   originalColumns?: { name: string; inferredType: string }[];
@@ -40,7 +40,7 @@ const datasetSchema = new mongoose.Schema<StoredDataset>(
     originalRowCount: { type: Number }, originalColumnCount: { type: Number }, originalColumns: { type: [{ name: String, inferredType: String }] },
     cleaningHistory: { type: [{ action: { type: String, required: true }, timestamp: { type: Date, required: true }, affectedRows: { type: Number, required: true }, affectedColumns: { type: Number, required: true }, column: String, parameters: mongoose.Schema.Types.Mixed, beforeRowCount: Number, beforeColumnCount: Number, beforeColumns: [{ name: String, inferredType: String }], versionStorageName: { type: String, required: true }, previousStorageName: String }], default: [] },
     savedAnalyses: { type: [{ id: { type: String, required: true }, name: { type: String, required: true, maxlength: 80 }, configuration: { type: mongoose.Schema.Types.Mixed, required: true }, createdAt: { type: Date, required: true } }], default: [] },
-    questionHistory: { type: [{ id: { type: String, required: true }, question: { type: String, required: true, maxlength: 500 }, planSummary: { type: String, required: true, maxlength: 300 }, createdAt: { type: Date, required: true } }], default: [] },
+    questionHistory: { type: [{ id: { type: String, required: true }, question: { type: String, required: true, maxlength: 500 }, planSummary: { type: String, required: true, maxlength: 300 }, answer: { type: String, maxlength: 4000 }, supported: Boolean, createdAt: { type: Date, required: true } }], default: [] },
   },
   { timestamps: { createdAt: true, updatedAt: false }, versionKey: false },
 );

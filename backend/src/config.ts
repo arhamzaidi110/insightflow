@@ -15,7 +15,7 @@ const configSchema = z.object({
   ANALYSIS_SERVICE_TOKEN: z.string().optional(),
   MONGODB_URI: z.string().optional(),
   GEMINI_API_KEY: z.string().optional(),
-  GEMINI_MODEL: z.string().trim().min(1).max(100).default('gemini-2.5-flash'),
+  GEMINI_MODEL: z.string().trim().min(1).max(100).default('gemini-3.8-flash'),
   MAX_UPLOAD_MB: z.coerce.number().int().positive().max(250).default(25),
   UPLOAD_DIR: z.string().min(1).default('uploads'),
   SESSION_SECRET: z.string().min(32).default('development-only-change-this-session-secret'),

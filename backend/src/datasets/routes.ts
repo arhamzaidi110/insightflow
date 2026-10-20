@@ -122,8 +122,8 @@ export function createDatasetRouter(options: {
     legacyHeaders: false,
     message: { error: 'Too many uploads. Try again later.' },
   });
-  const analysisLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 60, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Too many analysis requests. Try again later.' } });
-  const questionLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 12, standardHeaders: 'draft-8', legacyHeaders: false, keyGenerator: (_request, response) => getUser(response).id, message: { error: 'AI question limit reached. Try again later.' } });
+  const analysisLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 240, standardHeaders: 'draft-8', legacyHeaders: false, keyGenerator: (_request, response) => getUser(response).id, message: { error: 'Too many analysis requests. Try again later.' } });
+  const questionLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false, keyGenerator: (_request, response) => getUser(response).id, message: { error: 'AI question limit reached. Try again later.' } });
 
   router.get('/', requireUser, async (_request, response, next) => {
     try {
@@ -305,7 +305,8 @@ export function createDatasetRouter(options: {
       const preview = await options.analysis.preview(path.join(datasetRoot, active), filename, worksheet);
       const planned = await questionPlanner.createPlan(parsed.data, preview.columns);
       if (!planned.supported || !planned.plan) {
-        await options.store.updateForOwner(id!, getUser(response).id, { questionHistory: [...(record.questionHistory ?? []), { id: randomUUID(), question: parsed.data.question, planSummary: 'unsupported', createdAt: new Date() }].slice(-20) });
+        const previous = (record.questionHistory ?? []).filter((item) => item.question !== parsed.data.question);
+        await options.store.updateForOwner(id!, getUser(response).id, { questionHistory: [...previous, { id: randomUUID(), question: parsed.data.question, planSummary: 'unsupported', answer: planned.clarification, supported: false, createdAt: new Date() }].slice(-20) });
         response.set('Cache-Control', 'no-store').json({ supported: false, clarification: planned.clarification, dataset: { id: record.id, name: record.name }, activeFilters: parsed.data.filters ?? [] });
         return;
       }
@@ -314,9 +315,11 @@ export function createDatasetRouter(options: {
       if (!validPlan.success) throw new ApiError(502, 'The generated plan could not be safely validated. Please rephrase your question.');
       assertPlanColumns(validPlan.data as AnalyticsPlan, preview.columns);
       const result = await options.analysis.analyze(path.join(datasetRoot, active), filename, validPlan.data as AnalyticsPlan, worksheet);
-      await options.store.updateForOwner(id!, getUser(response).id, { questionHistory: [...(record.questionHistory ?? []), { id: randomUUID(), question: parsed.data.question, planSummary: planDescription(validPlan.data as AnalyticsPlan), createdAt: new Date() }].slice(-20) });
+      const answer = explainResult(parsed.data.question, validPlan.data as AnalyticsPlan, result);
+      const previous = (record.questionHistory ?? []).filter((item) => item.question !== parsed.data.question);
+      await options.store.updateForOwner(id!, getUser(response).id, { questionHistory: [...previous, { id: randomUUID(), question: parsed.data.question, planSummary: planDescription(validPlan.data as AnalyticsPlan), answer, supported: true, createdAt: new Date() }].slice(-20) });
       response.set('Cache-Control', 'no-store').json({
-        supported: true, answer: explainResult(parsed.data.question, validPlan.data as AnalyticsPlan, result),
+        supported: true, answer,
         calculation: result, columnsUsed: [...new Set([validPlan.data.column, validPlan.data.groupBy, validPlan.data.dateColumn, ...(validPlan.data.columns ?? []), ...(validPlan.data.filters ?? []).map((item) => item.column)].filter((item): item is string => Boolean(item)))],
         planSummary: planDescription(validPlan.data as AnalyticsPlan), filters: validPlan.data.filters ?? [], warnings: Array.isArray(result.warnings) ? result.warnings : [],
         dataset: { id: record.id, name: record.name },

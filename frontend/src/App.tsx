@@ -41,10 +41,12 @@ interface ImportedDataset {
 }
 
 interface SavedView { id: string; name: string; configuration: { chartType: 'bar' | 'line' | 'trend' | 'scatter'; title: string; dimension: string; metric?: string; aggregation: 'sum' | 'average' | 'count'; granularity?: 'daily' | 'monthly' | 'quarterly' | 'yearly'; filters?: Array<{ column: string; operator: string; value: string }> }; createdAt: string; }
-interface QuestionHistoryEntry { id: string; question: string; planSummary: string; createdAt: string; }
+interface QuestionHistoryEntry { id: string; question: string; planSummary: string; answer?: string; supported?: boolean; createdAt: string; }
 interface AskResult { supported: boolean; answer?: string; clarification?: string; calculation?: Record<string, unknown>; columnsUsed?: string[]; planSummary?: string; filters?: Array<{ column: string; operator: string; value?: unknown }>; warnings?: string[]; dataset: { id: string; name: string }; }
 
-function Dashboard({ dataset, csrfToken, onSelect, onDelete }: { dataset: ImportedDataset; csrfToken: string; onSelect: (dataset: ImportedDataset) => void; onDelete: () => void }) {
+type DashboardTab = 'overview' | 'ask' | 'clean';
+
+function Dashboard({ dataset, csrfToken, onSelect, onDelete, activeTab }: { dataset: ImportedDataset; csrfToken: string; onSelect: (dataset: ImportedDataset) => void; onDelete: () => void; activeTab: DashboardTab }) {
   const [datasets, setDatasets] = useState<ImportedDataset[]>([]);
   const [summary, setSummary] = useState<{ rowCount: number; columns: Array<{ column: string; count: number; missingCount: number; distinctCount: number; inferredType: string; statistics?: { sum: number; mean: number } }> } | null>(null);
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
@@ -60,6 +62,7 @@ function Dashboard({ dataset, csrfToken, onSelect, onDelete }: { dataset: Import
   const [aggregation, setAggregation] = useState<'sum' | 'average' | 'count'>('sum');
   const [saved, setSaved] = useState<SavedView[]>([]);
   const [questions, setQuestions] = useState<QuestionHistoryEntry[]>([]);
+  const [openHistoryId, setOpenHistoryId] = useState('');
   const [savedSelection, setSavedSelection] = useState('');
   const [renameValue, setRenameValue] = useState(dataset.name);
   const [viewName, setViewName] = useState('');
@@ -69,9 +72,32 @@ function Dashboard({ dataset, csrfToken, onSelect, onDelete }: { dataset: Import
   const [askResult, setAskResult] = useState<AskResult | null>(null);
   const [askError, setAskError] = useState('');
   const [asking, setAsking] = useState(false);
+  const [askElapsedSeconds, setAskElapsedSeconds] = useState(0);
   const [lastQuestion, setLastQuestion] = useState('');
   const filter = useMemo(() => filterColumn && filterValue ? [{ column: filterColumn, operator: 'contains', value: filterValue }] : [], [filterColumn, filterValue]);
-  const numericColumns = dataset.columns?.filter((column) => /number|integer|float|decimal/i.test(column.inferredType)) ?? [];
+  const numericColumns = useMemo(() => dataset.columns?.filter((column) => /number|integer|float|decimal/i.test(column.inferredType)) ?? [], [dataset.columns]);
+  const promptSuggestions = useMemo(() => {
+    const dateColumn = dataset.columns?.find((column) => /date|datetime/i.test(column.inferredType));
+    const categoryColumn = dataset.columns?.find((column) => !numericColumns.includes(column) && column !== dateColumn);
+    const metricName = numericColumns[0]?.name;
+    const metricLabel = metricName?.replaceAll('_', ' ');
+    const groupColumn = (dateColumn ?? categoryColumn)?.name;
+    const groupLabel = groupColumn?.replaceAll('_', ' ');
+    const suggestions: string[] = [];
+    if (metricName && groupColumn) {
+      suggestions.push(`Which ${groupLabel} had the highest ${metricLabel}?`);
+      suggestions.push(`Show the trend in ${metricLabel} by ${groupLabel}`);
+    }
+    if (metricName) suggestions.push(`What is the average ${metricLabel}?`);
+    if (!suggestions.length && dataset.columns?.length) suggestions.push(`Summarize ${dataset.columns.slice(0, 2).map((column) => column.name.replaceAll('_', ' ')).join(' and ')}`);
+    return [...new Set(suggestions)].slice(0, 3);
+  }, [dataset.columns, numericColumns]);
+
+  useEffect(() => {
+    if (!asking) return;
+    const timer = window.setInterval(() => setAskElapsedSeconds((seconds) => seconds + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [asking]);
 
   useEffect(() => { void apiRequest<{ datasets: ImportedDataset[] }>('/datasets').then((result) => setDatasets(result.datasets)).catch(() => setDatasets([])); void apiRequest<{ savedAnalyses: SavedView[] }>(`/datasets/${encodeURIComponent(dataset.id)}/saved-analyses`).then((result) => setSaved(result.savedAnalyses)).catch(() => setSaved([])); void apiRequest<{ questions: QuestionHistoryEntry[] }>(`/datasets/${encodeURIComponent(dataset.id)}/questions`).then((result) => setQuestions(result.questions)).catch(() => setQuestions([])); }, [dataset.id]);
   useEffect(() => { setRenameValue(dataset.name); setDimension(dataset.columns?.[0]?.name ?? ''); setMetric(dataset.columns?.find((column) => /number|integer|float|decimal/i.test(column.inferredType))?.name ?? ''); setPage(1); setSavedSelection(''); }, [dataset.id, dataset.columns, dataset.name]);
@@ -98,18 +124,19 @@ function Dashboard({ dataset, csrfToken, onSelect, onDelete }: { dataset: Import
   async function removeSavedView() { if (!savedSelection) return; try { await apiRequest<void>(`/datasets/${encodeURIComponent(dataset.id)}/saved-analyses/${encodeURIComponent(savedSelection)}`, { method: 'DELETE' }, csrfToken); setSaved((items) => items.filter((item) => item.id !== savedSelection)); setSavedSelection(''); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not delete this saved analysis.'); } }
   function openSavedView(id: string) { setSavedSelection(id); const view = saved.find((item) => item.id === id); if (!view) return; setChart(view.configuration.chartType); setDimension(view.configuration.dimension); setMetric(view.configuration.metric ?? ''); setAggregation(view.configuration.aggregation); setGranularity(view.configuration.granularity ?? 'monthly'); setViewName(view.configuration.title); }
   async function deleteQuestion(id: string) { try { await apiRequest<void>(`/datasets/${encodeURIComponent(dataset.id)}/questions/${encodeURIComponent(id)}`, { method: 'DELETE' }, csrfToken); setQuestions((items) => items.filter((item) => item.id !== id)); } catch (cause) { setAskError(cause instanceof Error ? cause.message : 'Could not remove question history.'); } }
+  async function replayQuestion(item: QuestionHistoryEntry) { setQuestion(item.question); setAskElapsedSeconds(0); setAsking(true); setAskError(''); setAskResult(null); setOpenHistoryId(item.id); try { const result = await apiRequest<AskResult>(`/datasets/${encodeURIComponent(dataset.id)}/ask`, { method: 'POST', body: JSON.stringify({ question: item.question, filters: filter }) }, csrfToken); setAskResult(result); setLastQuestion(result.supported ? item.question : ''); const history = await apiRequest<{ questions: QuestionHistoryEntry[] }>(`/datasets/${encodeURIComponent(dataset.id)}/questions`); setQuestions(history.questions); } catch (cause) { setAskError(cause instanceof Error ? cause.message : 'The assistant could not answer this question.'); } finally { setAsking(false); } }
   async function clearQuestionHistory() { if (!window.confirm('Clear all saved question history for this dataset?')) return; try { await apiRequest<void>(`/datasets/${encodeURIComponent(dataset.id)}/questions`, { method: 'DELETE' }, csrfToken); setQuestions([]); } catch (cause) { setAskError(cause instanceof Error ? cause.message : 'Could not clear question history.'); } }
   async function renameDataset() { try { const result = await apiRequest<{ dataset: { id: string; name: string } }>(`/datasets/${encodeURIComponent(dataset.id)}`, { method: 'PATCH', body: JSON.stringify({ name: renameValue }) }, csrfToken); const renamed = { ...dataset, name: result.dataset.name }; onSelect(renamed); setDatasets((items) => items.map((item) => item.id === renamed.id ? renamed : item)); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not rename the dataset.'); } }
   async function deleteDataset() { if (!window.confirm(`Delete ${dataset.name} and its uploaded data? This cannot be undone.`)) return; try { await apiRequest<{ storageCleanupComplete: boolean }>(`/datasets/${encodeURIComponent(dataset.id)}`, { method: 'DELETE' }, csrfToken); setDatasets((items) => items.filter((item) => item.id !== dataset.id)); onDelete(); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not delete the dataset.'); } }
-  async function askDataset(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setAsking(true); setAskError(''); setAskResult(null); try { const result = await apiRequest<AskResult>(`/datasets/${encodeURIComponent(dataset.id)}/ask`, { method: 'POST', body: JSON.stringify({ question, filters: filter, ...(lastQuestion && askResult?.supported ? { followUpContext: { question: lastQuestion, planSummary: askResult.planSummary ?? '' } } : {}) }) }, csrfToken); setAskResult(result); setLastQuestion(result.supported ? question : ''); const history = await apiRequest<{ questions: QuestionHistoryEntry[] }>(`/datasets/${encodeURIComponent(dataset.id)}/questions`); setQuestions(history.questions); } catch (cause) { setAskError(cause instanceof Error ? cause.message : 'The assistant could not answer this question.'); } finally { setAsking(false); } }
+  async function askDataset(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setAskElapsedSeconds(0); setAsking(true); setAskError(''); setAskResult(null); try { const result = await apiRequest<AskResult>(`/datasets/${encodeURIComponent(dataset.id)}/ask`, { method: 'POST', body: JSON.stringify({ question, filters: filter, ...(lastQuestion && askResult?.supported ? { followUpContext: { question: lastQuestion, planSummary: askResult.planSummary ?? '' } } : {}) }) }, csrfToken); setAskResult(result); setLastQuestion(result.supported ? question : ''); const history = await apiRequest<{ questions: QuestionHistoryEntry[] }>(`/datasets/${encodeURIComponent(dataset.id)}/questions`); setQuestions(history.questions); } catch (cause) { setAskError(cause instanceof Error ? cause.message : 'The assistant could not answer this question.'); } finally { setAsking(false); } }
 
-  return <section className="dashboard-workspace" aria-label="Dataset dashboard">
+  return <section className={`dashboard-workspace dashboard-tab-${activeTab}`} aria-label="Dataset dashboard">
     <div className="dashboard-toolbar"><label>Active dataset <select aria-label="Active dataset" value={dataset.id} onChange={(event) => { const selected = datasets.find((item) => item.id === event.target.value); if (selected) onSelect(selected); }}>{datasets.length ? datasets.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.rowCount.toLocaleString()} rows × {item.columnCount} cols · {item.sizeBytes ? formatBytes(item.sizeBytes) : 'size n/a'} · {item.createdAt ? new Date(item.createdAt).toLocaleDateString() : 'date n/a'} · {item.status ?? 'ready'}</option>) : <option value={dataset.id}>{dataset.name}</option>}</select></label><span>{dataset.fileType.toUpperCase()} · {dataset.columns?.length ?? dataset.columnCount} columns</span></div>
     <div className="dataset-management"><label>Dataset name <input aria-label="Dataset name" value={renameValue} maxLength={120} onChange={(event) => setRenameValue(event.target.value)} /></label><button type="button" className="secondary-button" disabled={!renameValue.trim() || renameValue.trim() === dataset.name} onClick={() => void renameDataset()}>Rename dataset</button><button type="button" className="danger-button" onClick={() => void deleteDataset()}>Delete dataset</button><span>{dataset.sizeBytes ? formatBytes(dataset.sizeBytes) : 'Size unavailable'}{dataset.createdAt ? ` · imported ${new Date(dataset.createdAt).toLocaleDateString()}` : ''} · {dataset.status ?? 'ready'}</span></div>
     <div className="section-heading"><div><p className="eyebrow">OVERVIEW</p><strong>{dataset.name}</strong><p className="muted">Live metrics update with the filters below.</p></div></div>
     <div className="dashboard-filters"><label>Filter column <select aria-label="Filter column" value={filterColumn} onChange={(event) => { setFilterColumn(event.target.value); setPage(1); }}><option value="">No filter</option>{dataset.columns?.map((column) => <option key={column.name}>{column.name}</option>)}</select></label><label>Contains <input aria-label="Filter value" value={filterValue} onChange={(event) => { setFilterValue(event.target.value); setPage(1); }} placeholder="Filter rows" /></label></div>
-    <section className="preview-card ask-workspace" aria-labelledby="ask-title"><p className="eyebrow">GROUNDED Q&amp;A</p><h3 id="ask-title">Ask about {dataset.name}</h3><p className="field-note">Gemini receives your question and column names/types. The calculation runs on this server; active filters are included.</p><div className="prompt-chips">{['Which month had the highest sales?', 'Show total sales by region', 'Which products have the lowest revenue?'].map((sample) => <button type="button" className="text-button" key={sample} onClick={() => setQuestion(sample)}>{sample}</button>)}</div><form className="ask-form" onSubmit={(event) => void askDataset(event)}><label htmlFor="dataset-question">Question</label><textarea id="dataset-question" value={question} onChange={(event) => setQuestion(event.target.value)} maxLength={500} minLength={3} required placeholder="Ask for a summary, comparison, ranking, trend, missing values, or duplicates" /><button className="primary-button" type="submit" disabled={asking || question.trim().length < 3}>{asking ? 'Calculating…' : 'Ask InsightFlow'}</button></form>{lastQuestion && <p className="field-note">Follow-up context uses only your last question and its validated calculation type. <button type="button" className="text-button" onClick={() => setLastQuestion('')}>Clear context</button></p>}{asking && <p role="status">Preparing a validated calculation…</p>}{askError && <p className="error-message" role="alert">{askError}</p>}{askResult && <div className="ask-answer" aria-live="polite"><p><strong>Dataset:</strong> {askResult.dataset.name}</p>{askResult.supported ? <><p className="answer-text">{askResult.answer}</p><p><strong>Calculation:</strong> {askResult.planSummary}</p><p><strong>Columns used:</strong> {askResult.columnsUsed?.join(', ') || 'None'}</p><p><strong>Filters:</strong> {askResult.filters?.length ? askResult.filters.map((item) => `${item.column} ${item.operator}${item.value === undefined ? '' : ` ${String(item.value)}`}`).join('; ') : 'None beyond the visible dashboard filter'}</p>{askResult.warnings?.map((warning) => <p className="field-note" key={warning}>{warning}</p>)}<details><summary>Show calculated source facts</summary><pre>{JSON.stringify(askResult.calculation, null, 2)}</pre></details><p className="field-note">This answer reports calculations from the selected data; it does not establish causation or predict future values.</p></> : <p>{askResult.clarification}</p>}</div>}</section>
-    <section className="preview-card history-workspace" aria-labelledby="question-history-title"><div className="table-heading"><div><p className="eyebrow">RECENT QUESTIONS</p><h3 id="question-history-title">Question history</h3></div><button type="button" className="secondary-button" disabled={!questions.length} onClick={() => void clearQuestionHistory()}>Clear history</button></div>{questions.length ? <ul>{questions.map((item) => <li key={item.id}><span><strong>{item.question}</strong><small>{item.planSummary} · {new Date(item.createdAt).toLocaleString()}</small></span><button type="button" className="text-button" aria-label={`Delete question: ${item.question}`} onClick={() => void deleteQuestion(item.id)}>Delete</button></li>)}</ul> : <p className="muted">No saved questions. History stores question text and the calculation type only, not dataset rows or answer data.</p>}</section>
+    <section className="preview-card ask-workspace" aria-labelledby="ask-title"><p className="eyebrow">GROUNDED Q&amp;A</p><h3 id="ask-title">Ask about {dataset.name}</h3><p className="field-note">Gemini receives your question and column names/types. The calculation runs on this server; active filters are included.</p><div className="prompt-chips">{promptSuggestions.map((sample) => <button type="button" className="text-button" key={sample} onClick={() => setQuestion(sample)}>{sample}</button>)}</div><form className="ask-form" onSubmit={(event) => void askDataset(event)}><label htmlFor="dataset-question">Question</label><textarea id="dataset-question" value={question} onChange={(event) => setQuestion(event.target.value)} maxLength={500} minLength={3} required placeholder="Ask for a summary, comparison, ranking, trend, missing values, or duplicates" /><button className="primary-button" type="submit" disabled={asking || question.trim().length < 3}>{asking ? 'Calculating...' : 'Ask InsightFlow'}</button></form>{lastQuestion && <p className="field-note">Follow-up context uses only your last question and its validated calculation type. <button type="button" className="text-button" onClick={() => setLastQuestion('')}>Clear context</button></p>}{asking && <div className="ai-progress" role="status" aria-live="polite"><span className="ai-progress-spinner" aria-hidden="true" /><div className="ai-progress-copy"><strong>InsightFlow is working on your answer</strong><span>Elapsed <time>{Math.floor(askElapsedSeconds / 60)}:{String(askElapsedSeconds % 60).padStart(2, '0')}</time> - This can take up to 3 minutes.</span><div className="ai-progress-track" aria-hidden="true"><span /></div></div></div>}{askError && <p className="error-message" role="alert">{askError}</p>}{askResult && <div className="ask-answer" aria-live="polite"><p><strong>Dataset:</strong> {askResult.dataset.name}</p>{askResult.supported ? <><p className="answer-text">{askResult.answer}</p><p><strong>Calculation:</strong> {askResult.planSummary}</p><p><strong>Columns used:</strong> {askResult.columnsUsed?.join(', ') || 'None'}</p><p><strong>Filters:</strong> {askResult.filters?.length ? askResult.filters.map((item) => `${item.column} ${item.operator}${item.value === undefined ? '' : ` ${String(item.value)}`}`).join('; ') : 'None beyond the visible dashboard filter'}</p>{askResult.warnings?.map((warning) => <p className="field-note" key={warning}>{warning}</p>)}<details><summary>Show calculated source facts</summary><pre>{JSON.stringify(askResult.calculation, null, 2)}</pre></details><p className="field-note">This answer reports calculations from the selected data; it does not establish causation or predict future values.</p></> : <p>{askResult.clarification}</p>}</div>}</section>
+    <section className="preview-card history-workspace" aria-labelledby="question-history-title"><div className="table-heading"><div><p className="eyebrow">RECENT QUESTIONS</p><h3 id="question-history-title">Question history</h3></div><button type="button" className="secondary-button" disabled={!questions.length} onClick={() => void clearQuestionHistory()}>Clear history</button></div>{questions.length ? <ul>{questions.map((item) => <li key={item.id}><span><strong>{item.question}</strong><small>{item.planSummary} · {new Date(item.createdAt).toLocaleString()}</small>{openHistoryId === item.id && item.answer && <span className="history-answer"><strong>{item.supported === false ? 'Response' : 'Answer'}</strong><span>{item.answer}</span></span>}</span><span className="history-actions">{item.answer ? <button type="button" className="text-button" aria-expanded={openHistoryId === item.id} onClick={() => setOpenHistoryId(openHistoryId === item.id ? '' : item.id)}>{openHistoryId === item.id ? 'Hide answer' : 'View answer'}</button> : <button type="button" className="text-button" disabled={asking} onClick={() => void replayQuestion(item)}>Generate &amp; save</button>}<button type="button" className="text-button" aria-label={`Delete question: ${item.question}`} onClick={() => void deleteQuestion(item.id)}>Delete</button></span></li>)}</ul> : <p className="muted">No saved questions yet. New answers will be saved here so you can open them again.</p>}</section>
     {error && <p className="error-message" role="alert">{error}</p>}{busy && <p role="status">Updating dashboard…</p>}
     <div className="stats-row dashboard-kpis"><div className="stat-card"><span>Filtered rows</span><strong>{(summary?.rowCount ?? dataset.rowCount).toLocaleString()}</strong></div><div className="stat-card"><span>Columns</span><strong>{dataset.columns?.length ?? dataset.columnCount}</strong></div><div className="stat-card"><span>Missing values</span><strong>{summary?.columns.reduce((sum, column) => sum + column.missingCount, 0).toLocaleString() ?? '—'}</strong></div><div className="stat-card"><span>Numeric columns</span><strong>{summary?.columns.filter((column) => column.inferredType === 'numeric').length ?? '—'}</strong></div></div>
     <section className="preview-card chart-builder"><div className="chart-controls"><label>Chart <select value={chart} onChange={(event) => { const next = event.target.value as typeof chart; setChart(next); if (next === 'trend' && !/date|datetime/i.test(dataset.columns?.find((column) => column.name === dimension)?.inferredType ?? '')) setDimension(dataset.columns?.find((column) => /date|datetime/i.test(column.inferredType))?.name ?? ''); if (next === 'scatter') { setDimension(numericColumns[0]?.name ?? ''); setMetric(numericColumns[1]?.name ?? numericColumns[0]?.name ?? ''); } }}><option value="bar">Category bar</option><option value="line">Category line</option><option value="trend" disabled={!dataset.columns?.some((column) => /date|datetime/i.test(column.inferredType))}>Time trend</option><option value="scatter" disabled={numericColumns.length < 2}>Scatter plot</option></select></label><label>{chart === 'trend' ? 'Date / X' : chart === 'scatter' ? 'Numeric X' : 'Category / X'} <select value={dimension} onChange={(event) => setDimension(event.target.value)}>{dataset.columns?.filter((column) => chart === 'trend' ? /date|datetime/i.test(column.inferredType) : chart === 'scatter' ? numericColumns.includes(column) : true).map((column) => <option key={column.name}>{column.name}</option>)}</select></label>{chart === 'trend' && <label>Time interval <select value={granularity} onChange={(event) => setGranularity(event.target.value as typeof granularity)}><option value="daily">Daily</option><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="yearly">Yearly</option></select></label>}<label>Numeric {chart === 'scatter' ? 'Y' : 'measure / Y'} <select value={metric} onChange={(event) => setMetric(event.target.value)}>{chart !== 'scatter' && <option value="">Count rows</option>}{numericColumns.map((column) => <option key={column.name}>{column.name}</option>)}</select></label>{chart !== 'scatter' && <label>Aggregate <select value={aggregation} onChange={(event) => setAggregation(event.target.value as typeof aggregation)}><option value="sum">Sum</option><option value="average">Average</option><option value="count">Count</option></select></label>}</div>
@@ -205,13 +232,16 @@ function AuthPanel({ onAuthenticated }: { onAuthenticated: (user: User, csrfToke
         <p className="eyebrow">YOUR DATA, MADE CLEAR</p>
         <h2>Bring a spreadsheet. Start with the facts.</h2>
         <p>Preview the file, inspect its columns, and choose the worksheet before importing it into your workspace.</p>
+        <div className="auth-visual">
+          <img src="/assets/insightflow-login.png" alt="Soft blue charts and spreadsheet panels illustrating data analysis" />
+        </div>
         <div className="aside-note"><span aria-hidden="true">✓</span> Original uploads stay private and unchanged.</div>
       </aside>
     </main>
   );
 }
 
-function UploadWorkspace({ csrfToken }: { csrfToken: string }) {
+function UploadWorkspace({ csrfToken, user, onSignOut }: { csrfToken: string; user: User; onSignOut: () => void }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const requestController = useRef<AbortController | null>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -220,6 +250,7 @@ function UploadWorkspace({ csrfToken }: { csrfToken: string }) {
   const [selectedSheet, setSelectedSheet] = useState('');
   const [error, setError] = useState('');
   const [imported, setImported] = useState<ImportedDataset | null>(null);
+  const [activeTab, setActiveTab] = useState<DashboardTab>('overview');
   const [savedDatasets, setSavedDatasets] = useState<ImportedDataset[]>([]);
   const [originalImported, setOriginalImported] = useState<ImportedDataset | null>(null);
   const [profile, setProfile] = useState<QualityProfile | null>(null);
@@ -255,6 +286,7 @@ function UploadWorkspace({ csrfToken }: { csrfToken: string }) {
     setFile(nextFile);
     setPreview(null);
     setImported(null);
+    setActiveTab('overview');
     setError('');
     setSelectedSheet('');
   }
@@ -329,6 +361,7 @@ function UploadWorkspace({ csrfToken }: { csrfToken: string }) {
         signal: controller.signal,
       }, csrfToken);
       setImported(result.dataset);
+      setActiveTab('overview');
       setSavedDatasets((items) => [result.dataset, ...items.filter((item) => item.id !== result.dataset.id)]);
       setOriginalImported(result.dataset);
       setPreview(null);
@@ -405,18 +438,35 @@ function UploadWorkspace({ csrfToken }: { csrfToken: string }) {
   }
 
   return (
-    <section className="workspace" aria-labelledby="upload-title">
-      <div className="section-heading">
+    <section className={`workspace${imported ? ' workspace-dashboard' : ''}`} aria-labelledby="upload-title">
+      {!imported && <div className="section-heading">
         <div>
           <p className="eyebrow">DATASETS</p>
           <h1 id="upload-title">Import a data file</h1>
           <p className="muted">Start with a preview. Your original file is preserved as uploaded.</p>
         </div>
         <span className="privacy-pill"><span aria-hidden="true">●</span> Private workspace</span>
-      </div>
+      </div>}
 
       {imported ? (
-        <>
+        <div className="dashboard-shell">
+        <aside className="dashboard-sidebar" aria-label="Dashboard navigation">
+          <div className="sidebar-brand"><span className="brand-mark" aria-hidden="true">I</span><span>InsightFlow</span></div>
+          <p className="sidebar-section-label">WORKSPACE</p>
+          <nav className="sidebar-nav" aria-label="Dataset sections">
+            <button type="button" aria-current={activeTab === 'overview' ? 'page' : undefined} className={activeTab === 'overview' ? 'sidebar-link sidebar-link-active' : 'sidebar-link'} onClick={() => setActiveTab('overview')}><svg className="sidebar-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="5" height="5" rx="1"/><rect x="12" y="3" width="5" height="5" rx="1"/><rect x="3" y="12" width="5" height="5" rx="1"/><rect x="12" y="12" width="5" height="5" rx="1"/></svg>Overview</button>
+            <button type="button" aria-current={activeTab === 'ask' ? 'page' : undefined} className={activeTab === 'ask' ? 'sidebar-link sidebar-link-active' : 'sidebar-link'} onClick={() => setActiveTab('ask')}><svg className="sidebar-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4.5h14v9H9l-5 3v-3H3z"/><path d="M7 8h6M7 10.5h4"/></svg>Ask your data</button>
+            <button type="button" aria-current={activeTab === 'clean' ? 'page' : undefined} className={activeTab === 'clean' ? 'sidebar-link sidebar-link-active' : 'sidebar-link'} onClick={() => setActiveTab('clean')}><svg className="sidebar-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m4 14 8-8 3 3-8 8H4z"/><path d="m10.5 7.5 3 3M13.5 4l2.5 2.5"/></svg>Clean data</button>
+          </nav>
+          <div className="sidebar-dataset"><span className="sidebar-dataset-dot" aria-hidden="true" /><div><small>ACTIVE DATASET</small><strong title={imported.name}>{imported.name}</strong><span>{imported.rowCount.toLocaleString()} rows · {imported.columnCount} columns</span></div></div>
+          <div className="sidebar-private"><svg className="sidebar-check" viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8 3 3 7-7"/></svg>Your workspace is private</div>
+        </aside>
+        <div className="dashboard-main">
+        <header className="dashboard-header"><span className="dashboard-header-context">Dataset workspace</span><div className="dashboard-header-account"><span>{user.email}</span><button type="button" className="text-button" onClick={onSignOut}>Sign out</button></div></header>
+        <div className="section-heading dashboard-page-heading">
+          <div><p className="eyebrow">DATA WORKSPACE</p><h1 id="upload-title">{activeTab === 'overview' ? 'Overview' : activeTab === 'ask' ? 'Ask your data' : 'Clean your data'}</h1><p className="muted">{activeTab === 'overview' ? 'Explore metrics, charts, and records from your dataset.' : activeTab === 'ask' ? 'Get answers grounded in the data you uploaded.' : 'Preview and apply changes to a working copy.'}</p></div>
+          <span className="privacy-pill"><span className="privacy-indicator" aria-hidden="true" /> Private workspace</span>
+        </div>
         <section className="success-card" aria-live="polite">
           <div className="success-icon" aria-hidden="true">✓</div>
           <div>
@@ -426,14 +476,14 @@ function UploadWorkspace({ csrfToken }: { csrfToken: string }) {
           </div>
           <button type="button" className="primary-button" disabled={profileBusy} onClick={async () => {
             setProfileBusy(true); setError('');
-            try { const result = await apiRequest<{ profile: QualityProfile }>(`/datasets/${encodeURIComponent(imported.id)}/profile`); setProfile(result.profile); }
+            try { const result = await apiRequest<{ profile: QualityProfile }>(`/datasets/${encodeURIComponent(imported.id)}/profile`); setProfile(result.profile); setActiveTab('overview'); }
             catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not generate the data quality report.'); }
             finally { setProfileBusy(false); }
           }}>{profileBusy ? 'Analyzing…' : profile ? 'Refresh quality report' : 'Generate data quality report'}</button>
           <button type="button" className="secondary-button" onClick={reset}>Import another file</button>
         </section>
-        <Dashboard dataset={imported} csrfToken={csrfToken} onSelect={(dataset) => { setImported(dataset); setSavedDatasets((items) => items.map((item) => item.id === dataset.id ? dataset : item)); setProfile(null); setCleanPreview(null); }} onDelete={() => { setImported(null); setProfile(null); setCleanPreview(null); setSavedDatasets((items) => items.filter((item) => item.id !== imported.id)); }} />
-        <section className="preview-card cleaning-workspace" aria-labelledby="cleaning-title">
+        <Dashboard dataset={imported} csrfToken={csrfToken} activeTab={activeTab} onSelect={(dataset) => { setImported(dataset); setActiveTab('overview'); setSavedDatasets((items) => items.map((item) => item.id === dataset.id ? dataset : item)); setProfile(null); setCleanPreview(null); }} onDelete={() => { setImported(null); setProfile(null); setCleanPreview(null); setSavedDatasets((items) => items.filter((item) => item.id !== imported.id)); }} />
+        {activeTab === 'clean' && <section className="preview-card cleaning-workspace" aria-labelledby="cleaning-title">
           <p className="eyebrow">CLEANING WORKSPACE</p>
           <h2 id="cleaning-title">Preview a change before applying it</h2>
           <p className="muted">Changes are saved as a derived working copy. Your original uploaded file stays unchanged.</p>
@@ -469,9 +519,9 @@ function UploadWorkspace({ csrfToken }: { csrfToken: string }) {
           </div>}
           {cleanHistory.length > 0 && <><h3>Cleaning history</h3><ol>{cleanHistory.map((item, index) => <li key={`${item.timestamp}-${index}`}>{item.action.replaceAll('_', ' ')}{item.column ? ` · ${item.column}` : ''} · {item.affectedRows} rows / {item.affectedColumns} columns affected</li>)}</ol>
             <button type="button" className="secondary-button" disabled={cleanBusy} onClick={() => void changeHistory('undo')}>Undo latest</button>{' '}<button type="button" className="secondary-button" disabled={cleanBusy} onClick={() => void changeHistory('reset')}>Reset to original</button></>}
-        </section>
+        </section>}
         {error && <p className="error-message page-error" role="alert">{error}</p>}
-        {profile && <section className="preview-card quality-report" aria-labelledby="quality-title">
+        {profile && activeTab === 'overview' && <section className="preview-card quality-report" aria-labelledby="quality-title">
           <p className="eyebrow">DATA QUALITY</p><h2 id="quality-title">Quality report for {imported.name}</h2>
           <p>{profile.rowCount.toLocaleString()} rows · {profile.columnCount} columns · {profile.duplicateRowCount.toLocaleString()} duplicate rows</p>
           {profile.warnings.length > 0 && <div className="warning-box"><ul>{profile.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div>}
@@ -486,7 +536,8 @@ function UploadWorkspace({ csrfToken }: { csrfToken: string }) {
             {column.warnings.map((warning) => <p className="error-message" key={warning}>{warning}</p>)}
           </article>)}</div>
         </section>}
-        </>
+        </div>
+        </div>
       ) : (
         <>
           {savedDatasets.length > 0 && <section className="preview-card dataset-library"><p className="eyebrow">YOUR DATASETS</p><h2>Continue where you left off</h2><div className="dataset-list">{savedDatasets.map((dataset) => <button type="button" className="dataset-choice" key={dataset.id} onClick={() => { setImported(dataset); setOriginalImported(dataset); setError(''); }}><strong>{dataset.name}</strong><span>{dataset.rowCount.toLocaleString()} rows · {dataset.columnCount} columns · {dataset.fileType.toUpperCase()}</span></button>)}</div></section>}
@@ -636,7 +687,7 @@ export default function App() {
         <div className="user-menu"><span className="user-email">{user.email}</span><button type="button" className="text-button" onClick={() => void signOut()}>Sign out</button></div>
       </header>
       {sessionError && <p className="connection-banner" role="alert">{sessionError}</p>}
-      <main id="main-content"><div id="datasets"><UploadWorkspace csrfToken={csrfToken} /></div></main>
+      <main id="main-content"><div id="datasets"><UploadWorkspace csrfToken={csrfToken} user={user} onSignOut={() => void signOut()} /></div></main>
       <footer className="page-footer">InsightFlow · Your uploads remain private to your account.</footer>
     </div>
   );

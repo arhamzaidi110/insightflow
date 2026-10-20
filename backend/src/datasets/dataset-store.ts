@@ -26,7 +26,7 @@ export interface DatasetRecord extends NewDataset {
   createdAt: Date;
   workingStorageName?: string;
   savedAnalyses: { id: string; name: string; configuration: Record<string, unknown>; createdAt: Date }[];
-  questionHistory: { id: string; question: string; planSummary: string; createdAt: Date }[];
+  questionHistory: { id: string; question: string; planSummary: string; answer?: string; supported?: boolean; createdAt: Date }[];
   cleaningHistory: { action: string; timestamp: Date; affectedRows: number; affectedColumns: number; column?: string; parameters?: Record<string, unknown>; beforeRowCount: number; beforeColumnCount: number; beforeColumns: DatasetColumn[]; versionStorageName: string; previousStorageName?: string }[];
 }
 
